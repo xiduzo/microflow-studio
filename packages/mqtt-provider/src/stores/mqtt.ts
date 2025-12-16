@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import mqtt, { IClientPublishOptions, OnMessageCallback } from 'mqtt';
+import { z } from 'zod';
 
 const clients = ['app', 'plugin'] as const;
 export type Client = (typeof clients)[number];
@@ -7,9 +8,138 @@ export type Client = (typeof clients)[number];
 const ConnectionStatuses = ['connected', 'disconnected', 'connecting'] as const;
 export type ConnectionStatus = (typeof ConnectionStatuses)[number];
 
-export type MqttConfig = Partial<
-	Pick<mqtt.IClientOptions, 'username' | 'password' | 'host' | 'port'>
-> & { uniqueId: string };
+/**
+ * Regex pattern to validate MQTT URL format
+ * Format: [<protocol>://]<host>[:<port>][/<path>]
+ * Protocol defaults to wss, port defaults to 8883, path defaults to /mqtt
+ */
+export const mqttUrlRegex = /^(ws|wss):\/\/[^\s\/:]+(?::\d+)?(?:\/.*)?$/;
+
+/**
+ * Zod schema for validating MQTT URL format
+ * Format: [<protocol>://]<host>[:<port>][/<path>]
+ * - Protocol is optional (defaults to wss)
+ * - Host is required
+ * - Port is optional (defaults to 8883)
+ * - Path is optional (defaults to /mqtt)
+ *
+ * Examples:
+ * - mqtt.xiduzo.com → wss://mqtt.xiduzo.com:8883/mqtt
+ * - mqtt.xiduzo.com:443 → wss://mqtt.xiduzo.com:443/mqtt
+ * - mqtt.xiduzo.com/mqtt → wss://mqtt.xiduzo.com:8883/mqtt
+ * - mqtt.xiduzo.com:443/mqtt → wss://mqtt.xiduzo.com:443/mqtt
+ * - wss://mqtt.xiduzo.com:443/mqtt → wss://mqtt.xiduzo.com:443/mqtt
+ */
+export const mqttUrlSchema = z
+	.string()
+	.min(1, 'Host is required')
+	.superRefine((input, ctx) => {
+		// Check if it's a full URL (starts with ws:// or wss://)
+		if (input.startsWith('ws://') || input.startsWith('wss://')) {
+			try {
+				console.log('[MQTT URL Validation] Parsing full URL:', input);
+				const urlObj = new URL(input);
+				const protocol = urlObj.protocol.replace(':', '') as 'ws' | 'wss';
+
+				if (protocol !== 'ws' && protocol !== 'wss') {
+					ctx.addIssue({
+						code: z.ZodIssueCode.custom,
+						message: `Invalid protocol: ${protocol}. Must be 'ws' or 'wss'`,
+					});
+					return;
+				}
+
+				const host = urlObj.hostname;
+				if (!host || host.length === 0) {
+					ctx.addIssue({
+						code: z.ZodIssueCode.custom,
+						message: 'Host is required',
+					});
+					return;
+				}
+
+				// Validate port if provided
+				if (urlObj.port) {
+					const port = parseInt(urlObj.port, 10);
+					if (isNaN(port) || port < 1 || port > 65535) {
+						ctx.addIssue({
+							code: z.ZodIssueCode.custom,
+							message: `Invalid port: ${urlObj.port}. Must be between 1 and 65535`,
+						});
+						return;
+					}
+				}
+			} catch (error) {
+				console.error('[MQTT URL Validation] Error parsing URL:', input, error);
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					message: `Invalid URL format. Expected: [ws://|wss://]<host>[:<port>][/<path>]. Error: ${error instanceof Error ? error.message : 'Unable to parse URL'}`,
+				});
+			}
+		} else {
+			// It's a host with optional port and path - validate format
+			// Format: host[:port][/path]
+			if (/\s/.test(input)) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					message: 'Host cannot contain spaces',
+				});
+				return;
+			}
+
+			// Parse host:port/path manually
+			// Host cannot contain colons or slashes
+			const portMatch = input.match(/^([^:/]+)(?::(\d+))?(?:\/(.*))?$/);
+			if (!portMatch) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					message: 'Invalid hostname format',
+				});
+				return;
+			}
+
+			const host = portMatch[1];
+			const portStr = portMatch[2];
+			const path = portMatch[3];
+
+			// Validate host
+			if (!host || host.length === 0) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					message: 'Host is required',
+				});
+				return;
+			}
+
+			// Check for basic hostname validity (contains at least one dot or is localhost)
+			if (host !== 'localhost' && !host.includes('.')) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					message: 'Invalid hostname format',
+				});
+				return;
+			}
+
+			// Validate port if provided
+			if (portStr) {
+				const port = parseInt(portStr, 10);
+				if (isNaN(port) || port < 1 || port > 65535) {
+					ctx.addIssue({
+						code: z.ZodIssueCode.custom,
+						message: `Invalid port: ${portStr}. Must be between 1 and 65535`,
+					});
+					return;
+				}
+			}
+		}
+	});
+
+export type MqttConfig = {
+	url: string; // Format: [<protocol>://]<host>[:<port>][/<path>] - protocol defaults to wss, port defaults to 8883, path defaults to /mqtt
+	username?: string;
+	password?: string;
+	uniqueId: string;
+};
 
 type Subscription = {
 	callback: OnMessageCallback;
@@ -123,6 +253,51 @@ export const useMqttStore = create<MqttStore>((set, get) => {
 		});
 	};
 
+	/**
+	 * Parses an MQTT URL string into connection options
+	 * Format: [<protocol>://]<host>[:<port>][/<path>]
+	 *
+	 * Defaults:
+	 * - Protocol: wss
+	 * - Port: 8883
+	 * - Path: /mqtt
+	 *
+	 * Examples:
+	 * - mqtt.xiduzo.com → wss://mqtt.xiduzo.com:8883/mqtt
+	 * - mqtt.xiduzo.com:443 → wss://mqtt.xiduzo.com:443/mqtt
+	 * - mqtt.xiduzo.com/mqtt → wss://mqtt.xiduzo.com:8883/mqtt
+	 * - mqtt.xiduzo.com:443/mqtt → wss://mqtt.xiduzo.com:443/mqtt
+	 * - wss://mqtt.xiduzo.com:443/mqtt → wss://mqtt.xiduzo.com:443/mqtt
+	 *
+	 * Note: This function assumes the input has already been validated by mqttUrlSchema
+	 */
+	const parseMqttUrl = (
+		input: string
+	): {
+		protocol: 'ws' | 'wss';
+		host: string;
+		port: number;
+		path: string;
+	} => {
+		try {
+			const validatedInput = mqttUrlSchema.parse(input);
+			console.log('[MQTT] <parseMqttUrl> Validated input:', validatedInput);
+			// parse the input from using the regex
+			const [, protocol, host, port, path] = validatedInput.match(mqttUrlRegex) || [];
+
+			return {
+				protocol: (protocol ?? 'wss') as 'ws' | 'wss',
+				host,
+				port: port ? parseInt(String(port), 10) : protocol === 'wss' ? 8883 : 1883,
+				path: path ?? '/mqtt',
+			};
+		} catch (error) {
+			throw new Error(
+				`Invalid MQTT URL format: ${input}. Expected format: [<protocol>://]<host>[:<port>][/<path>]`
+			);
+		}
+	};
+
 	const connect = async (configParam: MqttConfig, appName: Client) => {
 		config = configParam; // Update internal variables
 		if (client) {
@@ -132,16 +307,40 @@ export const useMqttStore = create<MqttStore>((set, get) => {
 
 		set({ status: 'connecting', appName, uniqueId: config.uniqueId });
 
-		const defaultClient: mqtt.IClientOptions = {
-			host: 'test.mosquitto.org',
-			port: 8081,
-		};
+		// Parse the URL string into connection components
+		const { protocol, host, port, path } = parseMqttUrl(config.url);
+		const clientId = `microflow_${appName}_${config.uniqueId}_${Date.now().toString(36)}`;
 
-		console.debug('[MQTT] <connect>', config, appName);
-		client = mqtt.connect({
-			...defaultClient,
-			protocol: 'wss',
-			...config,
+		// Construct the full URL for WebSocket connections
+		// mqtt.js requires the URL as the first argument for proper clientId handling
+		const url = `${protocol}://${host}:${port}${path}`;
+
+		console.debug('[MQTT] <connect> Parsed URL:', {
+			input: config.url,
+			protocol,
+			host,
+			port,
+			path,
+			constructedUrl: url,
+			clientId,
+		});
+
+		// Build connection options (without protocol/host/port/path when using URL)
+		const connectionOptions: mqtt.IClientOptions = {
+			username: config.username,
+			password: config.password,
+			clientId,
+			// connectTimeout: 30000, // 30 seconds
+			// keepalive: 60, // 60 seconds
+			// clean: true, // Start with a clean session
+			// reconnectPeriod: 1000, // Reconnect after 1 second
+			// For WSS connections, ensure proper SSL handling
+			...(protocol === 'wss'
+				? {
+						// Allow self-signed certificates (common for public brokers)
+						rejectUnauthorized: false,
+					}
+				: {}),
 			will: {
 				topic: `microflow/v1/${config.uniqueId}/${appName}/status`,
 				retain: true,
@@ -153,7 +352,10 @@ export const useMqttStore = create<MqttStore>((set, get) => {
 					100, 105, 115, 99, 111, 110, 110, 101, 99, 116, 101, 100,
 				]) as Buffer,
 			},
-		});
+		};
+
+		console.debug('[MQTT] <connect>', config, appName, url, connectionOptions);
+		client = mqtt.connect(url, connectionOptions);
 
 		// Handle status messages from other clients
 		const statusHandler = (topic: string, payload: Buffer) => {
