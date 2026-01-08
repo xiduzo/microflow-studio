@@ -290,7 +290,7 @@ export const useMqttStore = create<MqttStore>((set, get) => {
 				protocol: (protocol ?? 'wss') as 'ws' | 'wss',
 				host,
 				port: port ? parseInt(String(port), 10) : (protocol ?? 'wss') === 'wss' ? 8883 : 1883,
-				path: path ?? '/mqtt',
+				path: path ? (path.startsWith('/') ? path : `/${path}`) : '/mqtt',
 			};
 		} catch (error) {
 			throw new Error(
@@ -312,31 +312,31 @@ export const useMqttStore = create<MqttStore>((set, get) => {
 		const { protocol, host, port, path } = parseMqttUrl(config.url);
 		const clientId = `microflow_${appName}_${config.uniqueId}_${Date.now().toString(36)}`;
 
-		// Construct the full URL for WebSocket connections
-		// mqtt.js requires the URL as the first argument for proper clientId handling
-		const url = `${protocol}://${host}:${port}${path}`;
-
 		console.debug('[MQTT] <connect> Parsed URL:', {
 			input: config.url,
 			protocol,
 			host,
 			port,
 			path,
-			constructedUrl: url,
 			clientId,
 		});
 
-		// Build connection options (without protocol/host/port/path when using URL)
+		// Build connection options
+		// For WebSocket connections, use object form to ensure clientId is properly set
 		const connectionOptions: mqtt.IClientOptions = {
-			username: config.username,
-			password: config.password,
+			protocol: protocol === 'wss' ? 'wss' : protocol === 'ws' ? 'ws' : 'wss',
+			hostname: host,
+			port: port,
+			path: path,
+			...(config.username && { username: config.username }),
+			...(config.password && { password: config.password }),
 			clientId,
 			// connectTimeout: 30000, // 30 seconds
 			// keepalive: 60, // 60 seconds
 			// clean: true, // Start with a clean session
 			// reconnectPeriod: 1000, // Reconnect after 1 second
 			// For WSS connections, ensure proper SSL handling
-			...(protocol === 'wss'
+			...(protocol === 'wss' || protocol === 'ws'
 				? {
 						// Allow self-signed certificates (common for public brokers)
 						rejectUnauthorized: false,
@@ -355,8 +355,9 @@ export const useMqttStore = create<MqttStore>((set, get) => {
 			},
 		};
 
-		console.debug('[MQTT] <connect>', config, appName, url, connectionOptions);
-		client = mqtt.connect(url, connectionOptions);
+		console.debug('[MQTT] <connect>', config, appName, connectionOptions);
+		// Use object form instead of URL string to ensure clientId is properly set
+		client = mqtt.connect(connectionOptions);
 
 		// Handle status messages from other clients
 		const statusHandler = (topic: string, payload: Buffer) => {
