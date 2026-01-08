@@ -26,7 +26,7 @@ export function useSignalNodesAndEdges() {
 		return window.electron.ipcRenderer.on<UploadedCodeMessage>('ipc-microcontroller', result => {
 			if (!result.success) return;
 
-			console.log('[SIGNAL] <ipc-microcontroller>', result);
+			// console.debug('[SIGNAL] <ipc-microcontroller>', result);
 			update(result.data.source, result.data.value);
 
 			if (!result.data.edgeId) return;

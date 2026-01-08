@@ -29,6 +29,7 @@ const ipRegex = new RegExp(
 
 let runnerProcess: ChildProcess | undefined;
 let lastUsedPinsHash: string | null = null;
+let lastFlow: { nodes: Node[]; edges: Edge[]; ip?: string } | null = null;
 
 /**
  * Gets the current runner process
@@ -91,6 +92,9 @@ async function didPinsChange(nodes: Node[]) {
 }
 
 export async function ensureRunnerProcess(nodes: Node[], edges: Edge[], ip?: string) {
+	// Store the flow for later use (e.g., after flashing)
+	lastFlow = { nodes, edges, ip };
+
 	if (!runnerProcess) return startRunnerProcess(ip);
 
 	if (await didPinsChange(nodes)) {
@@ -100,6 +104,67 @@ export async function ensureRunnerProcess(nodes: Node[], edges: Edge[], ip?: str
 		});
 		await killRunnerProcess();
 		await startRunnerProcess(ip);
+	}
+}
+
+/**
+ * Sends the flow to the runner process
+ * This is the shared logic used by both the IPC handler and the ready handler
+ */
+export async function sendFlowToRunner(nodes: Node[], edges: Edge[], timer?: Timer) {
+	const flowTimer = timer || new Timer();
+	const runnerProcess = getRunnerProcess();
+
+	log.debug(
+		'[FLOW] <send>',
+		runnerProcess?.pid,
+		JSON.stringify(nodes, null, 2),
+		JSON.stringify(edges, null, 2),
+		flowTimer.duration
+	);
+
+	if (!runnerProcess) return;
+
+	runnerProcess.send({ type: 'flow', nodes, edges });
+}
+
+/**
+ * Gets the current connection state
+ * Returns the board state if connected, or null if not connected
+ */
+export function getCurrentConnectionState(): Board | null {
+	const connectedPort = getConnectedPort();
+	const runnerProcess = getRunnerProcess();
+
+	// If we have a connected port and runner process, verify they're still valid
+	if (connectedPort && runnerProcess) {
+		// Check if runner process is still alive
+		if (!runnerProcess.killed && runnerProcess.exitCode === null) {
+			// Runner is still running, return connect state
+			log.debug('[STATE] <get>', 'Port and runner process exist', connectedPort.path);
+			return {
+				type: 'ready',
+				port: connectedPort.path,
+				message: 'Board connected',
+			};
+		} else {
+			// Runner process died, clear the connection
+			log.debug('[STATE] <get>', 'Runner process died, clearing connection');
+			setConnectedPort(undefined);
+			return null;
+		}
+	} else if (connectedPort && !runnerProcess) {
+		// Port is set but no runner process - might need to reconnect
+		log.debug('[STATE] <get>', 'Port exists but no runner process', connectedPort.path);
+		return {
+			type: 'ready',
+			port: connectedPort.path,
+			message: 'Reconnecting to board',
+		};
+	} else {
+		// No connection state
+		log.debug('[STATE] <get>', 'No connection state');
+		return null;
 	}
 }
 
@@ -268,7 +333,7 @@ async function checkBoardOnPort(port: Pick<PortInfo, 'path'>, board: BoardName) 
 		});
 
 		runnerProcess.stdout?.on('data', async data => {
-			log.debug('[RUNNER] <stdout>', runnerProcess?.pid, timer.duration, data.toString());
+			// log.debug('[RUNNER] <stdout>', runnerProcess?.pid, timer.duration, data.toString());
 		});
 
 		// Handle runner process exit (might happen if port disconnects)
@@ -302,7 +367,7 @@ async function checkBoardOnPort(port: Pick<PortInfo, 'path'>, board: BoardName) 
 		runnerProcess.on('error', handleError);
 
 		async function handleMessage(data: Board | UploadedCodeMessage) {
-			log.debug('[RUNNER] <message>', runnerProcess?.pid, data.type, timer.duration);
+			// log.debug('[RUNNER] <message>', runnerProcess?.pid, data.type, timer.duration);
 			try {
 				switch (data.type) {
 					case 'message':
@@ -363,6 +428,7 @@ async function checkBoardOnPort(port: Pick<PortInfo, 'path'>, board: BoardName) 
 							data: { type: 'ready', port: port.path, pins: data.pins },
 						});
 						resolveWithCleanup(null);
+						sendFlowToRunner(lastFlow?.nodes ?? [], lastFlow?.edges ?? [], timer);
 						break;
 				}
 			} catch (e) {

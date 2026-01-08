@@ -88,6 +88,21 @@ export function useFlowSync() {
 		flowChanged();
 	}, [nodeToAdd, flowChanged, nodesCount, edgesCount]);
 
+	// Request connection status on mount/reload
+	useEffect(() => {
+		window.electron.ipcRenderer
+			.invoke<Board | null>('ipc-get-connection-status')
+			.then(state => {
+				if (!state) return;
+
+				setBoard(state);
+			})
+			.catch(error => {
+				console.error('[FLOW] <connection-status-error>', error);
+			});
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, []); // Only run on mount
+
 	useEffect(() => {
 		return window.electron.ipcRenderer.on<Board>('ipc-board', result => {
 			console.debug(`[FLOW] <<<< <ipc-board>`, result);
@@ -118,7 +133,7 @@ export function useFlowSync() {
 
 			setBoard(result.data);
 		});
-	}, [getNodes, getEdges, setBoard]);
+	}, [getNodes, getEdges, setBoard, flowChanged]);
 
 	return { flowChanged };
 }

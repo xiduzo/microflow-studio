@@ -146,9 +146,20 @@ export async function getKnownBoardsWithPorts(): Promise<[BoardName, PortInfo[]]
  * Starts polling for port changes as a fallback mechanism
  */
 export function startPortPolling(onPortDisconnected: () => Promise<void>): void {
-	// Initial port list
-	getConnectedPorts().then(ports => {
+	// Initial port list - check for existing boards on startup
+	getConnectedPorts().then(async ports => {
 		lastKnownPorts = ports;
+
+		// Check if there are any known boards already connected on startup
+		const boardsWithPorts = await getKnownBoardsWithPorts();
+		if (boardsWithPorts.length > 0 && !connectedPort) {
+			log.debug('[PORTS] <startup-boards-found>', boardsWithPorts.length);
+			// Send connect message to trigger connection attempt
+			sendMessageToRenderer<Board>('ipc-board', {
+				success: true,
+				data: { type: 'connect', message: 'Board detected' },
+			});
+		}
 	});
 
 	portPollingInterval = setInterval(async () => {
