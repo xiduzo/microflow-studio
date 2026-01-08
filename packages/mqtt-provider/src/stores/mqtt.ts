@@ -13,7 +13,7 @@ export type ConnectionStatus = (typeof ConnectionStatuses)[number];
  * Format: [<protocol>://]<host>[:<port>][/<path>]
  * Protocol defaults to wss, port defaults to 8883, path defaults to /mqtt
  */
-export const mqttUrlRegex = /^(ws|wss):\/\/[^\s\/:]+(?::\d+)?(?:\/.*)?$/;
+export const mqttUrlRegex = /^(?:(ws|wss):\/\/)?([^\s\/:]+)(?::(\d+))?(?:\/(.*))?$/;
 
 /**
  * Zod schema for validating MQTT URL format
@@ -34,10 +34,10 @@ export const mqttUrlSchema = z
 	.string()
 	.min(1, 'Host is required')
 	.superRefine((input, ctx) => {
+		console.log('[MQTT URL Validation] Parsing full URL:', input);
 		// Check if it's a full URL (starts with ws:// or wss://)
 		if (input.startsWith('ws://') || input.startsWith('wss://')) {
 			try {
-				console.log('[MQTT URL Validation] Parsing full URL:', input);
 				const urlObj = new URL(input);
 				const protocol = urlObj.protocol.replace(':', '') as 'ws' | 'wss';
 
@@ -100,7 +100,6 @@ export const mqttUrlSchema = z
 
 			const host = portMatch[1];
 			const portStr = portMatch[2];
-			const path = portMatch[3];
 
 			// Validate host
 			if (!host || host.length === 0) {
@@ -281,14 +280,16 @@ export const useMqttStore = create<MqttStore>((set, get) => {
 	} => {
 		try {
 			const validatedInput = mqttUrlSchema.parse(input);
-			console.log('[MQTT] <parseMqttUrl> Validated input:', validatedInput);
-			// parse the input from using the regex
-			const [, protocol, host, port, path] = validatedInput.match(mqttUrlRegex) || [];
+			const match = validatedInput.match(mqttUrlRegex);
+			if (!match || !match[2]) {
+				throw new Error(`Invalid MQTT URL format: ${input}. Could not parse host.`);
+			}
+			const [, protocol, host, port, path] = match;
 
 			return {
 				protocol: (protocol ?? 'wss') as 'ws' | 'wss',
 				host,
-				port: port ? parseInt(String(port), 10) : protocol === 'wss' ? 8883 : 1883,
+				port: port ? parseInt(String(port), 10) : (protocol ?? 'wss') === 'wss' ? 8883 : 1883,
 				path: path ?? '/mqtt',
 			};
 		} catch (error) {

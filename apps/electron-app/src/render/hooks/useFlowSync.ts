@@ -100,8 +100,7 @@ export function useFlowSync() {
 			.catch(error => {
 				console.error('[FLOW] <connection-status-error>', error);
 			});
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, []); // Only run on mount
+	}, []);
 
 	useEffect(() => {
 		return window.electron.ipcRenderer.on<Board>('ipc-board', result => {
@@ -133,7 +132,8 @@ export function useFlowSync() {
 
 			setBoard(result.data);
 		});
-	}, [getNodes, getEdges, setBoard, flowChanged]);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [getNodes, getEdges, setBoard]);
 
 	return { flowChanged };
 }

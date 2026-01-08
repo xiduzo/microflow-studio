@@ -403,6 +403,11 @@ async function checkBoardOnPort(port: Pick<PortInfo, 'path'>, board: BoardName) 
 								.catch(error => rejectWithCleanup(error));
 							return; // Exit early, Promise will be resolved/rejected by the recursive call
 						} catch (error) {
+							// Re-register handler in case process is still running after error
+							// This prevents unhandled messages if flashing fails or recursive call rejects
+							if (runnerProcess && !runnerProcess.killed && runnerProcess.exitCode === null) {
+								runnerProcess.on('message', handleMessage);
+							}
 							try {
 								await checkPortError(error, port.path, 'flashing');
 								// Port still exists or not a port error - reject with original error
