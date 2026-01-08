@@ -46,11 +46,13 @@ export class Pixel extends Hardware<Value, Data, pixel.Strip> {
 	}
 
 	private forward(amount: number = 1) {
+		const parsedAmount = transformValueToNumber(amount);
+		const normalizedAmount = Math.round(parsedAmount);
 		const newValue = this.value.map((_color, index) => {
-			const newIndex = (index - amount + this.data.length) % this.data.length;
+			const newIndex = (index - normalizedAmount + this.data.length) % this.data.length;
 			return this.value[newIndex];
 		});
-		this.component?.shift(amount, pixel.FORWARD, true);
+		this.component?.shift(normalizedAmount, pixel.FORWARD, true);
 		this.flush(newValue);
 	}
 
@@ -82,10 +84,7 @@ export class Pixel extends Hardware<Value, Data, pixel.Strip> {
 		if (this.flushTimeout) clearTimeout(this.flushTimeout);
 		this.flushTimeout = setTimeout(
 			() => {
-				if (!this.component) {
-					console.warn('[PIXEL] <not_ready> flushing too early');
-					return;
-				}
+				if (!this.component) return;
 				this.lastFlushTime = Date.now();
 				this.value = color;
 				this.component?.show();

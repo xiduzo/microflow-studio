@@ -9,7 +9,7 @@ import {
 import type { Edge, Node } from '@xyflow/react';
 import { fork, ChildProcess } from 'child_process';
 import { sendMessageToRenderer } from './window';
-import { Board, IpcResponse, UploadedCodeMessage } from '../common/types';
+import { Board, IpcResponse, UploadedCodeMessage, Pin } from '../common/types';
 import { getRandomMessage } from '../common/messages';
 import log from 'electron-log/node';
 import { existsSync } from 'fs';
@@ -30,6 +30,7 @@ const ipRegex = new RegExp(
 let runnerProcess: ChildProcess | undefined;
 let lastUsedPinsHash: string | null = null;
 let lastFlow: { nodes: Node[]; edges: Edge[]; ip?: string } | null = null;
+let currentPins: Pin[] | undefined = undefined;
 
 /**
  * Gets the current runner process
@@ -45,6 +46,7 @@ export async function killRunnerProcess() {
 	runnerProcess?.kill('SIGKILL');
 	runnerProcess = undefined;
 	setConnectedPort(undefined);
+	currentPins = undefined;
 	await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for the process to die
 }
 
@@ -146,11 +148,13 @@ export function getCurrentConnectionState(): Board | null {
 				type: 'ready',
 				port: connectedPort.path,
 				message: 'Board connected',
+				pins: currentPins,
 			};
 		} else {
 			// Runner process died, clear the connection
 			log.debug('[STATE] <get>', 'Runner process died, clearing connection');
 			setConnectedPort(undefined);
+			currentPins = undefined;
 			return null;
 		}
 	} else if (connectedPort && !runnerProcess) {
@@ -160,6 +164,7 @@ export function getCurrentConnectionState(): Board | null {
 			type: 'ready',
 			port: connectedPort.path,
 			message: 'Reconnecting to board',
+			pins: currentPins,
 		};
 	} else {
 		// No connection state
@@ -428,6 +433,7 @@ async function checkBoardOnPort(port: Pick<PortInfo, 'path'>, board: BoardName) 
 						break;
 					case 'ready':
 						log.debug(`[RUNNER] <${data.type}>`, runnerProcess?.pid, timer.duration);
+						currentPins = data.pins;
 						sendMessageToRenderer<Board>('ipc-board', {
 							success: true,
 							data: { type: 'ready', port: port.path, pins: data.pins },
