@@ -2,7 +2,7 @@
 	"name": "microflow-hardware-bridge",
 	"productName": "microflow-hardware-bridge",
 	"private": true,
-	"version": "0.9.0",
+	"version": "0.9.1",
 	"scripts": {
 		"dev": "concurrently --names \"UI,PLUGIN\" --prefix-colors \"blue,green\" \"yarn watch:ui\" \"yarn watch:plugin\"",
 		"dev:ui-only": "vite -c ./vite.config.ui.ts",
