@@ -1,13 +1,7 @@
-import {
-	FigmaVariable,
-	MqttConfig,
-	useFigmaStore,
-	useMqttStore,
-} from '@microflow/mqtt-provider/client';
+import { FigmaVariable, useFigmaStore, useMqttStore } from '@microflow/mqtt-provider/client';
 import { Toaster, TooltipProvider } from '@microflow/ui';
 import { ReactFlowProvider } from '@xyflow/react';
 import { createRoot } from 'react-dom/client';
-import { useDarkMode, useLocalStorage } from 'usehooks-ts';
 import { IpcDeepLinkListener } from './render/components/IpcDeepLinkListener';
 import { IpcMenuListeners } from './render/components/IpcMenuListener';
 import { ReactFlowCanvas } from './render/components/react-flow/ReactFlowCanvas';
@@ -19,6 +13,7 @@ import { StrictMode, useEffect, useMemo } from 'react';
 import { useAppStore } from './render/stores/app';
 import { Settings } from './render/components/Settings';
 import logger from 'electron-log/renderer';
+import { useDarkMode } from 'usehooks-ts';
 
 export function App() {
 	return (

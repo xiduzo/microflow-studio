@@ -54,6 +54,7 @@ class _BASE<Value, Data extends BaseData> extends EventEmitter {
 	}
 
 	postMessage(action: string | symbol, edgeId?: string) {
+		console.log('[BASE] <postMessage>', action, edgeId, this.id, this.value);
 		const message = messageSchema.parse({
 			source: this.id,
 			sourceHandle: action.toString(),

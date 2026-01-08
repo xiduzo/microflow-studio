@@ -19,6 +19,7 @@ import {
 	getConnectedPort,
 	setConnectedPort,
 	getKnownBoardsWithPorts,
+	acquirePortOperationLock,
 } from './port-manager';
 import { Timer } from './utils';
 
@@ -171,6 +172,9 @@ export async function startRunnerProcess(ip?: string) {
 async function checkBoardOnPort(port: Pick<PortInfo, 'path'>, board: BoardName) {
 	await killRunnerProcess();
 
+	// Acquire lock to prevent port polling during connection attempt
+	const releaseLock = acquirePortOperationLock();
+
 	const timer = new Timer();
 	const filePath = join(__dirname, 'workers', 'runner.js');
 
@@ -184,30 +188,44 @@ async function checkBoardOnPort(port: Pick<PortInfo, 'path'>, board: BoardName) 
 		let isResolved = false;
 		let portCheckInterval: NodeJS.Timeout | null = null;
 
-		// Helper function to clean up and reject/resolve
-		const cleanup = () => {
+		// Helper function to clean up connection-related resources (but keep message handler active)
+		const cleanupConnectionResources = () => {
 			if (portCheckInterval) {
 				clearInterval(portCheckInterval);
 				portCheckInterval = null;
 			}
 			if (runnerProcess) {
-				runnerProcess.off('message', handleMessage);
+				// Only remove exit/error handlers that are specific to connection phase
+				// Keep message handler active for runtime messages (it handles both connection and runtime)
 				runnerProcess.off('exit', handleExit);
 				runnerProcess.off('error', handleError);
+			}
+			// Release the lock when cleanup is called
+			releaseLock();
+		};
+
+		// Full cleanup - removes all handlers (used when process is killed or on fatal errors)
+		const fullCleanup = () => {
+			cleanupConnectionResources();
+			if (runnerProcess) {
+				// Remove message handler only on fatal errors/kill
+				runnerProcess.off('message', handleMessage);
 			}
 		};
 
 		const rejectWithCleanup = (error: Error) => {
 			if (isResolved) return;
 			isResolved = true;
-			cleanup();
+			fullCleanup();
 			reject(error);
 		};
 
 		const resolveWithCleanup = (value: any) => {
 			if (isResolved) return;
 			isResolved = true;
-			cleanup();
+			// On successful connection, only clean up connection resources
+			// Keep message handler active - it handles both connection and runtime messages
+			cleanupConnectionResources();
 			resolve(value);
 		};
 
@@ -284,7 +302,7 @@ async function checkBoardOnPort(port: Pick<PortInfo, 'path'>, board: BoardName) 
 		runnerProcess.on('error', handleError);
 
 		async function handleMessage(data: Board | UploadedCodeMessage) {
-			// log.debug('[RUNNER] <message>', runnerProcess?.pid, data.type, timer.duration);
+			log.debug('[RUNNER] <message>', runnerProcess?.pid, data.type, timer.duration);
 			try {
 				switch (data.type) {
 					case 'message':
@@ -352,7 +370,8 @@ async function checkBoardOnPort(port: Pick<PortInfo, 'path'>, board: BoardName) 
 			}
 		}
 
-		runnerProcess?.on('message', handleMessage);
+		// Register connection-phase message handler
+		runnerProcess.on('message', handleMessage);
 	});
 }
 
@@ -416,6 +435,9 @@ async function flashFirmataToBoard(board: BoardName, port: Pick<PortInfo, 'path'
 	await killRunnerProcess();
 	log.debug('[FLASH] <start>', firmataPath, board, port.path, flashTimer.duration);
 
+	// Acquire lock to prevent port polling during flashing
+	const releaseLock = acquirePortOperationLock();
+
 	// Store the port path before flashing (it may disappear during flashing)
 	const portPath = port.path;
 	const portDisappearedDuringFlash = { value: false };
@@ -433,6 +455,8 @@ async function flashFirmataToBoard(board: BoardName, port: Pick<PortInfo, 'path'
 				clearInterval(portCheckInterval);
 				portCheckInterval = null;
 			}
+			// Release the lock when cleanup is called
+			releaseLock();
 		};
 
 		// Set up a timeout to prevent freezing if flashing takes too long
@@ -462,8 +486,6 @@ async function flashFirmataToBoard(board: BoardName, port: Pick<PortInfo, 'path'
 			// Flash the board (port may disappear during this, which is expected)
 			await new Flasher(board, portPath).flash(firmataPath);
 
-			cleanup();
-
 			log.debug('[FLASH] <done>', flashTimer.duration);
 
 			// After flashing, the board will disconnect and reconnect
@@ -480,10 +502,10 @@ async function flashFirmataToBoard(board: BoardName, port: Pick<PortInfo, 'path'
 				}
 			}
 
+			// Release lock after all operations complete
+			cleanup();
 			resolve(null);
 		} catch (flashError) {
-			cleanup();
-
 			log.error('[FLASH] <error>', flashError, flashTimer.duration);
 
 			// Check if the error is port-related
@@ -503,11 +525,13 @@ async function flashFirmataToBoard(board: BoardName, port: Pick<PortInfo, 'path'
 					log.debug('[FLASH] <port-reappeared-after-error>', portPath);
 					// Port reappeared - if error was port-related, it might have been temporary
 					// If it was a real flash error, reject with the original error
+					cleanup();
 					reject(flashError);
 				} catch (waitError) {
 					// Port didn't reappear - this could be:
 					// 1. A real disconnection (if error was port-related)
 					// 2. A flash failure that prevented reconnection (if error was not port-related)
+					cleanup();
 					if (isPortRelatedError) {
 						reject(
 							new PortDisconnectedError(
@@ -525,9 +549,11 @@ async function flashFirmataToBoard(board: BoardName, port: Pick<PortInfo, 'path'
 				try {
 					await checkPortError(flashError, portPath, 'flashing');
 					// Port still exists but couldn't flash - preserve original error
+					cleanup();
 					reject(flashError);
 				} catch (portError) {
 					// Port disconnected or already PortDisconnectedError - reject with port error
+					cleanup();
 					reject(portError);
 				}
 			}

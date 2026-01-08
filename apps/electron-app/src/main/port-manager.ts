@@ -23,6 +23,10 @@ let portPollingInterval: NodeJS.Timeout | null = null;
 let lastKnownPorts: PortInfo[] = [];
 const PORT_POLL_INTERVAL_MS = 1000; // Poll every second as fallback
 
+// Lock to prevent port polling during critical operations (flashing, connecting)
+let portOperationLock = false;
+let lockCount = 0;
+
 /**
  * Gets the currently connected port
  */
@@ -35,6 +39,34 @@ export function getConnectedPort(): PortInfo | undefined {
  */
 export function setConnectedPort(port: PortInfo | undefined): void {
 	connectedPort = port;
+}
+
+/**
+ * Acquires a lock to prevent port polling during critical operations
+ * Returns a release function that must be called when the operation completes
+ */
+export function acquirePortOperationLock(): () => void {
+	lockCount++;
+	portOperationLock = true;
+	log.debug('[PORT-LOCK] <acquired>', lockCount);
+
+	return () => {
+		lockCount--;
+		if (lockCount <= 0) {
+			lockCount = 0;
+			portOperationLock = false;
+			log.debug('[PORT-LOCK] <released>');
+		} else {
+			log.debug('[PORT-LOCK] <decremented>', lockCount);
+		}
+	};
+}
+
+/**
+ * Checks if a port operation is currently in progress
+ */
+export function isPortOperationLocked(): boolean {
+	return portOperationLock;
 }
 
 /**
@@ -120,6 +152,12 @@ export function startPortPolling(onPortDisconnected: () => Promise<void>): void 
 	});
 
 	portPollingInterval = setInterval(async () => {
+		// Skip polling if a critical operation is in progress
+		if (portOperationLock) {
+			log.debug('[POLL] <skipped>', 'Port operation in progress');
+			return;
+		}
+
 		const currentPorts = await getConnectedPorts();
 
 		// Check for disconnected port
