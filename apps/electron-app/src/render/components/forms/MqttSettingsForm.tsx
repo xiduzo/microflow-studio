@@ -9,23 +9,23 @@ import {
 	FormItem,
 	FormLabel,
 	FormMessage,
-	Icons,
 	Input,
-	Switch,
 	useForm,
 	Zod,
 	zodResolver,
 	toast,
+	Tooltip,
+	TooltipTrigger,
+	TooltipContent,
+	Icons,
 } from '@microflow/ui';
 import { useAppStore } from '../../stores/app';
-import { MqttConfig } from '@microflow/mqtt-provider/client';
+import { mqttUrlSchema } from '@microflow/mqtt-provider/client';
 
 const schema = Zod.object({
-	host: Zod.string().or(Zod.ipv4()),
-	port: Zod.number().min(0),
+	url: mqttUrlSchema,
 	username: Zod.string().optional(),
 	password: Zod.string().optional(),
-	protocol: Zod.enum(['ws', 'wss']).default('wss'),
 });
 
 type Schema = Zod.infer<typeof schema>;
@@ -38,11 +38,9 @@ export function MqttSettingsForm() {
 		mode: 'onChange',
 		reValidateMode: 'onChange',
 		defaultValues: {
-			host: mqttConfig?.host,
-			port: mqttConfig?.port,
+			url: mqttConfig?.url || 'test.mosquitto.org',
 			username: mqttConfig?.username,
 			password: mqttConfig?.password as string,
-			protocol: (mqttConfig as MqttConfig & { protocol: 'ws' | 'wss' })?.protocol as 'ws' | 'wss',
 		},
 	});
 
@@ -76,34 +74,68 @@ export function MqttSettingsForm() {
 					</Field>
 					<FormField
 						control={form.control}
-						name='host'
+						name='url'
 						render={({ field }) => (
 							<FormItem>
-								<FormLabel>Host</FormLabel>
+								<FormLabel className='flex items-center justify-between'>
+									Broker URL
+									<Tooltip>
+										<TooltipTrigger>
+											<Icons.CircleQuestionMark size={16} />
+										</TooltipTrigger>
+										<TooltipContent className='max-w-xs'>
+											<div className='space-y-2'>
+												<p className='font-semibold'>Format:</p>
+												<code className='text-xs'>
+													[&lt;protocol&gt;://]&lt;host&gt;[:&lt;port&gt;][/&lt;path&gt;]
+												</code>
+												<p className='text-xs text-muted-foreground'>
+													Defaults:
+													<br /> protocol=<code>wss</code>, port=<code>8883</code>, path=
+													<code>/mqtt</code>
+												</p>
+												<p className='font-semibold mt-3'>Examples:</p>
+												<ul className='text-xs space-y-1 list-disc list-inside'>
+													<li>
+														<code>mqtt.xiduzo.com</code> → wss://mqtt.xiduzo.com:8883/mqtt
+													</li>
+													<li>
+														<code>mqtt.xiduzo.com:443</code> → wss://mqtt.xiduzo.com:443/mqtt
+													</li>
+													<li>
+														<code>mqtt.xiduzo.com/mqtt</code> → wss://mqtt.xiduzo.com:8883/mqtt
+													</li>
+													<li>
+														<code>mqtt.xiduzo.com:443/mqtt</code> → wss://mqtt.xiduzo.com:443/mqtt
+													</li>
+													<li>
+														<code>wss://mqtt.xiduzo.com:8884</code> →
+														wss://mqtt.xiduzo.com:8884/mqtt
+													</li>
+													<li>
+														<code>wss://mqtt.xiduzo.com:443/mqtt</code> →
+														wss://mqtt.xiduzo.com:443/mqtt
+													</li>
+													<li>
+														<code>ws://mqtt.xiduzo.com:1883</code> → ws://mqtt.xiduzo.com:1883/mqtt
+													</li>
+												</ul>
+											</div>
+										</TooltipContent>
+									</Tooltip>
+								</FormLabel>
 								<FormControl>
-									<Input placeholder='test.mosquitto.org' {...field} />
+									<Input placeholder='mqtt.xiduzo.com' {...field} />
 								</FormControl>
-								<FormMessage />
-							</FormItem>
-						)}
-					/>
-					<FormField
-						control={form.control}
-						name='port'
-						render={({ field }) => (
-							<FormItem>
-								<FormLabel>Port</FormLabel>
-								<FormControl>
-									<Input
-										placeholder='8081'
-										type='number'
-										{...field}
-										onChange={e => {
-											const value = e.target.value;
-											field.onChange(value === '' ? undefined : Number(value));
-										}}
-									/>
-								</FormControl>
+								<FieldDescription>
+									<code className='text-xs'>
+										[&lt;protocol&gt;://]&lt;host&gt;[:&lt;port&gt;][/&lt;path&gt;]
+									</code>
+									<br />
+									<span className='text-xs text-muted-foreground'>
+										Defaults: wss://&lt;host&gt;:8883/mqtt
+									</span>
+								</FieldDescription>
 								<FormMessage />
 							</FormItem>
 						)}
@@ -129,25 +161,6 @@ export function MqttSettingsForm() {
 								<FormLabel>Password</FormLabel>
 								<FormControl>
 									<Input placeholder='************' type='password' {...field} />
-								</FormControl>
-								<FormMessage />
-							</FormItem>
-						)}
-					/>
-					<FormField
-						control={form.control}
-						name='protocol'
-						render={({ field }) => (
-							<FormItem className='flex justify-between items-center space-y-0'>
-								<FormLabel className='grow'>Encrypted (wss)</FormLabel>
-								<FormControl>
-									<Switch
-										{...field}
-										onCheckedChange={checked => {
-											form.setValue('protocol', checked ? 'wss' : 'ws');
-										}}
-										defaultChecked={form.getValues('protocol') === 'wss'}
-									/>
 								</FormControl>
 								<FormMessage />
 							</FormItem>

@@ -6,7 +6,7 @@
 		"type": "git",
 		"url": "https://github.com/xiduzo/microflow"
 	},
-	"version": "0.9.0",
+	"version": "0.9.1",
 	"description": "An application which allows you to create flow-based logic for microcontrollers",
 	"author": {
 		"name": "Sander Boer",

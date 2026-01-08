@@ -2493,6 +2493,7 @@ __metadata:
   dependencies:
     mqtt: 5.14.1
     react: 18.3.1
+    zod: ^4.1.12
     zustand: 5.0.8
   languageName: unknown
   linkType: soft

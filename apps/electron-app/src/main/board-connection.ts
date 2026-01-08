@@ -19,6 +19,7 @@ import {
 	getConnectedPort,
 	setConnectedPort,
 	getKnownBoardsWithPorts,
+	acquirePortOperationLock,
 } from './port-manager';
 import { Timer } from './utils';
 
@@ -28,6 +29,7 @@ const ipRegex = new RegExp(
 
 let runnerProcess: ChildProcess | undefined;
 let lastUsedPinsHash: string | null = null;
+let lastFlow: { nodes: Node[]; edges: Edge[]; ip?: string } | null = null;
 
 /**
  * Gets the current runner process
@@ -90,6 +92,9 @@ async function didPinsChange(nodes: Node[]) {
 }
 
 export async function ensureRunnerProcess(nodes: Node[], edges: Edge[], ip?: string) {
+	// Store the flow for later use (e.g., after flashing)
+	lastFlow = { nodes, edges, ip };
+
 	if (!runnerProcess) return startRunnerProcess(ip);
 
 	if (await didPinsChange(nodes)) {
@@ -99,6 +104,67 @@ export async function ensureRunnerProcess(nodes: Node[], edges: Edge[], ip?: str
 		});
 		await killRunnerProcess();
 		await startRunnerProcess(ip);
+	}
+}
+
+/**
+ * Sends the flow to the runner process
+ * This is the shared logic used by both the IPC handler and the ready handler
+ */
+export async function sendFlowToRunner(nodes: Node[], edges: Edge[], timer?: Timer) {
+	const flowTimer = timer || new Timer();
+	const runnerProcess = getRunnerProcess();
+
+	log.debug(
+		'[FLOW] <send>',
+		runnerProcess?.pid,
+		JSON.stringify(nodes, null, 2),
+		JSON.stringify(edges, null, 2),
+		flowTimer.duration
+	);
+
+	if (!runnerProcess) return;
+
+	runnerProcess.send({ type: 'flow', nodes, edges });
+}
+
+/**
+ * Gets the current connection state
+ * Returns the board state if connected, or null if not connected
+ */
+export function getCurrentConnectionState(): Board | null {
+	const connectedPort = getConnectedPort();
+	const runnerProcess = getRunnerProcess();
+
+	// If we have a connected port and runner process, verify they're still valid
+	if (connectedPort && runnerProcess) {
+		// Check if runner process is still alive
+		if (!runnerProcess.killed && runnerProcess.exitCode === null) {
+			// Runner is still running, return connect state
+			log.debug('[STATE] <get>', 'Port and runner process exist', connectedPort.path);
+			return {
+				type: 'ready',
+				port: connectedPort.path,
+				message: 'Board connected',
+			};
+		} else {
+			// Runner process died, clear the connection
+			log.debug('[STATE] <get>', 'Runner process died, clearing connection');
+			setConnectedPort(undefined);
+			return null;
+		}
+	} else if (connectedPort && !runnerProcess) {
+		// Port is set but no runner process - might need to reconnect
+		log.debug('[STATE] <get>', 'Port exists but no runner process', connectedPort.path);
+		return {
+			type: 'ready',
+			port: connectedPort.path,
+			message: 'Reconnecting to board',
+		};
+	} else {
+		// No connection state
+		log.debug('[STATE] <get>', 'No connection state');
+		return null;
 	}
 }
 
@@ -171,6 +237,9 @@ export async function startRunnerProcess(ip?: string) {
 async function checkBoardOnPort(port: Pick<PortInfo, 'path'>, board: BoardName) {
 	await killRunnerProcess();
 
+	// Acquire lock to prevent port polling during connection attempt
+	const releaseLock = acquirePortOperationLock();
+
 	const timer = new Timer();
 	const filePath = join(__dirname, 'workers', 'runner.js');
 
@@ -180,6 +249,76 @@ async function checkBoardOnPort(port: Pick<PortInfo, 'path'>, board: BoardName) 
 			// serviceName: 'Microflow studio - microcontroller validator',
 			stdio: 'pipe',
 		});
+
+		let isResolved = false;
+		let portCheckInterval: NodeJS.Timeout | null = null;
+
+		// Helper function to clean up connection-related resources (but keep message handler active)
+		const cleanupConnectionResources = () => {
+			if (portCheckInterval) {
+				clearInterval(portCheckInterval);
+				portCheckInterval = null;
+			}
+			if (runnerProcess) {
+				// Only remove exit/error handlers that are specific to connection phase
+				// Keep message handler active for runtime messages (it handles both connection and runtime)
+				runnerProcess.off('exit', handleExit);
+				runnerProcess.off('error', handleError);
+			}
+			// Release the lock when cleanup is called
+			releaseLock();
+		};
+
+		// Full cleanup - removes all handlers (used when process is killed or on fatal errors)
+		const fullCleanup = () => {
+			cleanupConnectionResources();
+			if (runnerProcess) {
+				// Remove message handler only on fatal errors/kill
+				runnerProcess.off('message', handleMessage);
+			}
+		};
+
+		const rejectWithCleanup = (error: Error) => {
+			if (isResolved) return;
+			isResolved = true;
+			fullCleanup();
+			reject(error);
+		};
+
+		const resolveWithCleanup = (value: any) => {
+			if (isResolved) return;
+			isResolved = true;
+			// On successful connection, only clean up connection resources
+			// Keep message handler active - it handles both connection and runtime messages
+			cleanupConnectionResources();
+			resolve(value);
+		};
+
+		// Periodically check if the port still exists while waiting for connection
+		const checkPortExists = async () => {
+			if (isResolved) return;
+
+			try {
+				const ports = await getConnectedPorts();
+				const portStillExists = ports.find(p => p.path === port.path);
+
+				if (!portStillExists) {
+					log.warn('[RUNNER] <port-disconnected-during-connection>', port.path, timer.duration);
+					rejectWithCleanup(
+						new PortDisconnectedError(
+							port.path,
+							`Port ${port.path} disconnected during connection attempt`
+						)
+					);
+				}
+			} catch (error) {
+				log.warn('[RUNNER] <port-check-error>', error);
+				// Don't reject on check error, just log it
+			}
+		};
+
+		// Start periodic port checking (every 500ms)
+		portCheckInterval = setInterval(checkPortExists, 500);
 
 		runnerProcess.on('spawn', () => {
 			log.debug('[RUNNER] <spawn>', runnerProcess?.pid, timer.duration);
@@ -194,8 +333,38 @@ async function checkBoardOnPort(port: Pick<PortInfo, 'path'>, board: BoardName) 
 		});
 
 		runnerProcess.stdout?.on('data', async data => {
-			log.debug('[RUNNER] <stdout>', runnerProcess?.pid, timer.duration, data.toString());
+			// log.debug('[RUNNER] <stdout>', runnerProcess?.pid, timer.duration, data.toString());
 		});
+
+		// Handle runner process exit (might happen if port disconnects)
+		const handleExit = async (code: number | null, signal: string | null) => {
+			if (isResolved) return;
+
+			log.warn('[RUNNER] <exit>', runnerProcess?.pid, code, signal, timer.duration);
+
+			// Check if port still exists when process exits unexpectedly
+			try {
+				await checkPortExists();
+				// If port still exists, it was a different error
+				if (!isResolved) {
+					rejectWithCleanup(
+						new Error(`Runner process exited unexpectedly (code: ${code}, signal: ${signal})`)
+					);
+				}
+			} catch (error) {
+				// Port check already rejected, nothing to do
+			}
+		};
+
+		// Handle runner process errors
+		const handleError = (error: Error) => {
+			if (isResolved) return;
+			log.warn('[RUNNER] <process-error>', runnerProcess?.pid, error, timer.duration);
+			rejectWithCleanup(error);
+		};
+
+		runnerProcess.on('exit', handleExit);
+		runnerProcess.on('error', handleError);
 
 		async function handleMessage(data: Board | UploadedCodeMessage) {
 			// log.debug('[RUNNER] <message>', runnerProcess?.pid, data.type, timer.duration);
@@ -212,7 +381,7 @@ async function checkBoardOnPort(port: Pick<PortInfo, 'path'>, board: BoardName) 
 						let notificationTimeout: NodeJS.Timeout | null = null;
 						try {
 							if (ipRegex.test(port.path)) {
-								return reject(new Error(data.message ?? 'Unknown error'));
+								return rejectWithCleanup(new Error(data.message ?? 'Unknown error'));
 							}
 
 							// Prevents double error messages from causing multiple flashers
@@ -228,15 +397,24 @@ async function checkBoardOnPort(port: Pick<PortInfo, 'path'>, board: BoardName) 
 								} satisfies IpcResponse<Board>);
 							}, 7500);
 							await flashFirmataToBoard(board, port);
-							return checkBoardOnPort(port, board);
+							// Recursively call checkBoardOnPort and chain the result to this Promise
+							checkBoardOnPort(port, board)
+								.then(result => resolveWithCleanup(result))
+								.catch(error => rejectWithCleanup(error));
+							return; // Exit early, Promise will be resolved/rejected by the recursive call
 						} catch (error) {
+							// Re-register handler in case process is still running after error
+							// This prevents unhandled messages if flashing fails or recursive call rejects
+							if (runnerProcess && !runnerProcess.killed && runnerProcess.exitCode === null) {
+								runnerProcess.on('message', handleMessage);
+							}
 							try {
 								await checkPortError(error, port.path, 'flashing');
 								// Port still exists or not a port error - reject with original error
-								reject(error);
+								rejectWithCleanup(error as Error);
 							} catch (portError) {
 								// Port disconnected or already PortDisconnectedError - reject with port error
-								reject(portError);
+								rejectWithCleanup(portError as Error);
 							}
 						} finally {
 							if (notificationTimeout) clearTimeout(notificationTimeout);
@@ -246,7 +424,7 @@ async function checkBoardOnPort(port: Pick<PortInfo, 'path'>, board: BoardName) 
 					case 'exit':
 					case 'fail':
 						log.warn(`[RUNNER] <${data.type}>`, runnerProcess?.pid, data.message, timer.duration);
-						reject(new Error(data.message ?? 'Unknown error'));
+						rejectWithCleanup(new Error(data.message ?? 'Unknown error'));
 						break;
 					case 'ready':
 						log.debug(`[RUNNER] <${data.type}>`, runnerProcess?.pid, timer.duration);
@@ -254,15 +432,63 @@ async function checkBoardOnPort(port: Pick<PortInfo, 'path'>, board: BoardName) 
 							success: true,
 							data: { type: 'ready', port: port.path, pins: data.pins },
 						});
-						resolve(null);
+						resolveWithCleanup(null);
+						sendFlowToRunner(lastFlow?.nodes ?? [], lastFlow?.edges ?? [], timer);
 						break;
 				}
 			} catch (e) {
-				reject(e);
+				rejectWithCleanup(e as Error);
 			}
 		}
 
-		runnerProcess?.on('message', handleMessage);
+		// Register connection-phase message handler
+		runnerProcess.on('message', handleMessage);
+	});
+}
+
+/**
+ * Waits for a port to appear in the list of connected ports
+ * @param portPath The path of the port to wait for
+ * @param timeoutMs Maximum time to wait in milliseconds (default: 10000)
+ * @param checkIntervalMs How often to check in milliseconds (default: 500)
+ * @returns Promise that resolves when the port is found, or rejects on timeout
+ */
+async function waitForPortToReappear(
+	portPath: string,
+	timeoutMs: number = 10000,
+	checkIntervalMs: number = 500
+): Promise<void> {
+	const startTime = Date.now();
+
+	return new Promise((resolve, reject) => {
+		const checkPort = async () => {
+			try {
+				const ports = await getConnectedPorts();
+				const portFound = ports.find(p => p.path === portPath);
+
+				if (portFound) {
+					log.debug('[FLASH] <port-reappeared>', portPath, Date.now() - startTime);
+					resolve();
+					return;
+				}
+
+				// Check if we've exceeded the timeout
+				if (Date.now() - startTime >= timeoutMs) {
+					reject(
+						new Error(`Port ${portPath} did not reappear within ${timeoutMs}ms after flashing`)
+					);
+					return;
+				}
+
+				// Schedule next check
+				setTimeout(checkPort, checkIntervalMs);
+			} catch (error) {
+				reject(error);
+			}
+		};
+
+		// Start checking immediately
+		checkPort();
 	});
 }
 
@@ -279,22 +505,128 @@ async function flashFirmataToBoard(board: BoardName, port: Pick<PortInfo, 'path'
 
 	await killRunnerProcess();
 	log.debug('[FLASH] <start>', firmataPath, board, port.path, flashTimer.duration);
+
+	// Acquire lock to prevent port polling during flashing
+	const releaseLock = acquirePortOperationLock();
+
+	// Store the port path before flashing (it may disappear during flashing)
+	const portPath = port.path;
+	const portDisappearedDuringFlash = { value: false };
+
 	return new Promise(async (resolve, reject) => {
+		let portCheckInterval: NodeJS.Timeout | null = null;
+		let flashTimeout: NodeJS.Timeout | null = null;
+
+		const cleanup = () => {
+			if (flashTimeout) {
+				clearTimeout(flashTimeout);
+				flashTimeout = null;
+			}
+			if (portCheckInterval) {
+				clearInterval(portCheckInterval);
+				portCheckInterval = null;
+			}
+			// Release the lock when cleanup is called
+			releaseLock();
+		};
+
+		// Set up a timeout to prevent freezing if flashing takes too long
+		flashTimeout = setTimeout(() => {
+			log.error('[FLASH] <timeout>', portPath, flashTimer.duration);
+			cleanup();
+			reject(new Error(`Flashing timed out after 60 seconds for port ${portPath}`));
+		}, 60000); // 60 second timeout
+
+		// Monitor port status during flashing (it's expected to disappear)
+		portCheckInterval = setInterval(async () => {
+			try {
+				const ports = await getConnectedPorts();
+				const portStillExists = ports.find(p => p.path === portPath);
+				if (!portStillExists && !portDisappearedDuringFlash.value) {
+					log.debug('[FLASH] <port-disconnected-expected>', portPath, flashTimer.duration);
+					portDisappearedDuringFlash.value = true;
+				}
+			} catch (error) {
+				// Ignore check errors during flashing
+			}
+		}, 500);
+
 		try {
 			log.debug(`[FLASH] <start>`, flashTimer.duration);
-			await new Flasher(board, port.path).flash(firmataPath);
+
+			// Flash the board (port may disappear during this, which is expected)
+			await new Flasher(board, portPath).flash(firmataPath);
+
 			log.debug('[FLASH] <done>', flashTimer.duration);
+
+			// After flashing, the board will disconnect and reconnect
+			// Wait for the port to reappear (up to 10 seconds)
+			if (portDisappearedDuringFlash.value) {
+				log.debug('[FLASH] <waiting-for-port>', portPath, flashTimer.duration);
+				try {
+					await waitForPortToReappear(portPath, 10000, 500);
+					log.debug('[FLASH] <port-ready>', portPath, flashTimer.duration);
+				} catch (waitError) {
+					log.warn('[FLASH] <port-wait-timeout>', portPath, waitError);
+					// Don't fail if port doesn't reappear - it might come back later
+					// The connection loop will handle it
+				}
+			}
+
+			// Release lock after all operations complete
+			cleanup();
 			resolve(null);
 		} catch (flashError) {
 			log.error('[FLASH] <error>', flashError, flashTimer.duration);
 
-			try {
-				await checkPortError(flashError, port.path, 'flashing');
-				// Port still exists but couldn't open - preserve original error
-				reject(flashError);
-			} catch (portError) {
-				// Port disconnected or already PortDisconnectedError - reject with port error
-				reject(portError);
+			// Check if the error is port-related
+			const isPortRelatedError =
+				flashError instanceof PortDisconnectedError ||
+				flashError instanceof UnableToOpenSerialConnection ||
+				(flashError instanceof Error &&
+					(flashError.message.includes('No such file or directory') ||
+						flashError.message.includes('cannot open') ||
+						flashError.message.includes('disconnected')));
+
+			// If port disappeared during flash (expected behavior), wait for it to reappear
+			if (portDisappearedDuringFlash.value) {
+				log.debug('[FLASH] <checking-port-reappearance>', portPath, flashTimer.duration);
+				try {
+					await waitForPortToReappear(portPath, 5000, 200);
+					log.debug('[FLASH] <port-reappeared-after-error>', portPath);
+					// Port reappeared - if error was port-related, it might have been temporary
+					// If it was a real flash error, reject with the original error
+					cleanup();
+					reject(flashError);
+				} catch (waitError) {
+					// Port didn't reappear - this could be:
+					// 1. A real disconnection (if error was port-related)
+					// 2. A flash failure that prevented reconnection (if error was not port-related)
+					cleanup();
+					if (isPortRelatedError) {
+						reject(
+							new PortDisconnectedError(
+								portPath,
+								`Port ${portPath} disconnected during flashing and did not reappear: ${flashError instanceof Error ? flashError.message : String(flashError)}`
+							)
+						);
+					} else {
+						// Flash error that prevented reconnection
+						reject(flashError);
+					}
+				}
+			} else {
+				// Port didn't disappear during flash, so check if it's still there
+				try {
+					await checkPortError(flashError, portPath, 'flashing');
+					// Port still exists but couldn't flash - preserve original error
+					cleanup();
+					reject(flashError);
+				} catch (portError) {
+					// Port disconnected or already PortDisconnectedError - reject with port error
+					cleanup();
+					reject(portError);
+				}
 			}
 		}
 	});

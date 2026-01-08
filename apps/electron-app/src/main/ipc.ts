@@ -4,7 +4,13 @@ import { mainWindowReady } from './window';
 
 import log from 'electron-log/node';
 import { exportFlow, selectAudioFiles, readAudioFile } from './file';
-import { ensureRunnerProcess, getRunnerProcess, killRunnerProcess } from './board-connection';
+import {
+	ensureRunnerProcess,
+	getRunnerProcess,
+	killRunnerProcess,
+	sendFlowToRunner,
+	getCurrentConnectionState,
+} from './board-connection';
 import { checkConnectedPort, setupUSBDeviceListeners, stopPortPolling } from './port-manager';
 import { Timer } from './utils';
 
@@ -34,15 +40,7 @@ ipcMain.on('ipc-flow', async (event, data: { ip?: string; nodes: Node[]; edges: 
 
 	await ensureRunnerProcess(data.nodes, data.edges, data.ip);
 
-	const runnerProcess = getRunnerProcess();
-	log.debug(
-		'[FLOW] <send>',
-		runnerProcess?.pid,
-		JSON.stringify(data.nodes, null, 2),
-		JSON.stringify(data.edges, null, 2),
-		timer.duration
-	);
-	runnerProcess?.send({ type: 'flow', nodes: data.nodes, edges: data.edges });
+	await sendFlowToRunner(data.nodes, data.edges, timer);
 });
 
 ipcMain.on('ipc-external-value', (_event, data: { nodeId: string; value: unknown }) => {
@@ -59,6 +57,12 @@ ipcMain.handle('ipc-read-audio-file', async (_event, filePath: string) => {
 	const buffer = await readAudioFile(filePath);
 	// Convert buffer to base64 for transmission
 	return buffer.toString('base64');
+});
+
+ipcMain.handle('ipc-get-connection-status', async () => {
+	log.debug('[IPC] <get-connection-status>');
+	const state = getCurrentConnectionState();
+	return state;
 });
 
 killRunnerProcess().catch(log.debug);

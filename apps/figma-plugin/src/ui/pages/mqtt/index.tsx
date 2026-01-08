@@ -12,19 +12,21 @@ import {
 	useForm,
 	Zod,
 	zodResolver,
+	Tooltip,
+	TooltipTrigger,
+	TooltipContent,
 } from '@microflow/ui';
 import { useEffect } from 'react';
 import { adjectives, animals, uniqueNamesGenerator } from 'unique-names-generator';
-import { LOCAL_STORAGE_KEYS, ShowToast } from '../../../common/types/Message';
+import { ShowToast } from '../../../common/types/Message';
 import { PageContent, PageHeader } from '../../components/Page';
-import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { useSetWindowSize } from '../../hooks/useSetWindowSize';
 import { sendMessageToFigma } from '../../utils/sendMessageToFigma';
 import { useAppStore } from '../../stores/app';
+import { mqttUrlSchema } from '@microflow/mqtt-provider/client';
 
 const schema = Zod.object({
-	host: Zod.string().optional(),
-	port: Zod.number().optional(),
+	url: mqttUrlSchema,
 	username: Zod.string().optional(),
 	password: Zod.string().optional(),
 	uniqueId: Zod.string()
@@ -35,8 +37,7 @@ const schema = Zod.object({
 type Schema = Zod.infer<typeof schema>;
 
 const defaultValues: Schema = {
-	host: 'test.mosquitto.org',
-	port: 8081,
+	url: 'test.mosquitto.org',
 	uniqueId: '',
 };
 
@@ -47,7 +48,10 @@ export function Mqtt() {
 		resolver: zodResolver(schema),
 		defaultValues: {
 			...defaultValues,
-			...(mqttConfig as Schema),
+			url: mqttConfig?.url || defaultValues.url,
+			username: mqttConfig?.username,
+			password: mqttConfig?.password,
+			uniqueId: mqttConfig?.uniqueId || '',
 		},
 	});
 
@@ -70,7 +74,10 @@ export function Mqtt() {
 		if (!mqttConfig) return;
 		form.reset({
 			...defaultValues,
-			...(mqttConfig as Schema),
+			url: mqttConfig.url || defaultValues.url,
+			username: mqttConfig.username,
+			password: mqttConfig.password,
+			uniqueId: mqttConfig.uniqueId || '',
 		});
 	}, [mqttConfig, form.reset]);
 
@@ -108,34 +115,70 @@ export function Mqtt() {
 						/>
 						<FormField
 							control={form.control}
-							name='host'
+							name='url'
 							render={({ field }) => (
 								<FormItem>
-									<FormLabel>Host</FormLabel>
+									<FormLabel className='flex items-center justify-between'>
+										Broker URL
+										<Tooltip>
+											<TooltipTrigger>
+												<Icons.CircleQuestionMark size={16} />
+											</TooltipTrigger>
+											<TooltipContent className='max-w-xs'>
+												<div className='space-y-2'>
+													<p className='font-semibold'>Format:</p>
+													<code className='text-xs'>
+														[&lt;protocol&gt;://]&lt;host&gt;[:&lt;port&gt;][/&lt;path&gt;]
+													</code>
+													<p className='text-xs text-muted-foreground'>
+														Defaults: <br />
+														protocol=<code>wss</code>, port=<code>8883</code>, path=
+														<code>/mqtt</code>
+													</p>
+													<p className='font-semibold mt-3'>Examples:</p>
+													<ul className='text-xs space-y-1 list-disc list-inside'>
+														<li>
+															<code>mqtt.xiduzo.com</code> → wss://mqtt.xiduzo.com:8883/mqtt
+														</li>
+														<li>
+															<code>mqtt.xiduzo.com:443</code> → wss://mqtt.xiduzo.com:443/mqtt
+														</li>
+														<li>
+															<code>mqtt.xiduzo.com/mqtt</code> → wss://mqtt.xiduzo.com:8883/mqtt
+														</li>
+														<li>
+															<code>mqtt.xiduzo.com:443/mqtt</code> → wss://mqtt.xiduzo.com:443/mqtt
+														</li>
+														<li>
+															<code>wss://mqtt.xiduzo.com:8884</code> →
+															wss://mqtt.xiduzo.com:8884/mqtt
+														</li>
+														<li>
+															<code>wss://mqtt.xiduzo.com:443/mqtt</code> →
+															wss://mqtt.xiduzo.com:443/mqtt
+														</li>
+														<li>
+															<code>ws://mqtt.xiduzo.com:1883</code> →
+															ws://mqtt.xiduzo.com:1883/mqtt
+														</li>
+													</ul>
+												</div>
+											</TooltipContent>
+										</Tooltip>
+									</FormLabel>
 									<FormControl>
-										<Input placeholder='test.mosquitto.org' {...field} />
+										<Input placeholder='mqtt.xiduzo.com' {...field} />
 									</FormControl>
-									<FormMessage />
-								</FormItem>
-							)}
-						/>
-						<FormField
-							control={form.control}
-							name='port'
-							render={({ field }) => (
-								<FormItem>
-									<FormLabel>Port</FormLabel>
-									<FormControl>
-										<Input
-											placeholder='8081'
-											type='number'
-											{...field}
-											onChange={e => {
-												const value = e.target.value;
-												field.onChange(value === '' ? undefined : Number(value));
-											}}
-										/>
-									</FormControl>
+									<FormDescription>
+										Format:{' '}
+										<code className='text-xs'>
+											[&lt;protocol&gt;://]&lt;host&gt;[:&lt;port&gt;][/&lt;path&gt;]
+										</code>
+										<br />
+										<span className='text-xs text-muted-foreground'>
+											Defaults: wss://&lt;host&gt;:8883/mqtt
+										</span>
+									</FormDescription>
 									<FormMessage />
 								</FormItem>
 							)}
@@ -171,8 +214,7 @@ export function Mqtt() {
 						</Button>
 						<div className='text-blue-500 text-sm'>
 							<Icons.Info className='w-3.5 h-3.5 pb-0.5 inline-block mr-1' />
-							This plugin will force a connection over <code>wss://</code>, make sure your settings
-							will connect to an encrypted websocket.
+							Make sure to use <code>wss://</code> protocol for encrypted connections.
 						</div>
 					</form>
 				</Form>

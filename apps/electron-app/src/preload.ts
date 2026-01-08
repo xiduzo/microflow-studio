@@ -15,7 +15,8 @@ export type Channels =
 	| 'ipc-flow'
 	| 'ipc-board'
 	| 'ipc-select-audio-files'
-	| 'ipc-read-audio-file';
+	| 'ipc-read-audio-file'
+	| 'ipc-get-connection-status';
 
 type IpcCallback<Data> = (response: IpcResponse<Data>) => void;
 type Listener = (event: IpcRendererEvent, response: IpcResponse<any>) => void;
