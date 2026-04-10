@@ -1,3 +1,6 @@
+> [!WARNING]  
+> This repository is depricated in favor of the [current implementation of Microflow](https://github.com/xiduzo/microflow)
+
 # Microflow
 
 **Create interactive prototypes that connect your designs to real hardware.**
